@@ -1,0 +1,122 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    hostname: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "echo", "ruok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "bash", "-c", "nc -z localhost 9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  command_api:
+    build:
+      context: .
+      dockerfile: command_api/Dockerfile
+    restart: on-failure
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  processor:
+    build:
+      context: .
+      dockerfile: processor/Dockerfile
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  projector:
+    build:
+      context: .
+      dockerfile: projector/Dockerfile
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://user:password@postgres/ledger
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  query_api:
+    build:
+      context: .
+      dockerfile: query_api/Dockerfile
+    restart: on-failure
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_URL: postgresql://user:password@postgres/ledger
+    depends_on:
+      postgres:
+        condition: service_healthy
+  test-runner:
+    build:
+      context: .
+      dockerfile: test-runner/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://user:password@postgres/ledger
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: [ "pytest", "-v", "--cov=.", "--cov-report=term-missing", "--disable-warnings" ]
+
+volumes:
+  postgres_data:
+  kafka_data:
